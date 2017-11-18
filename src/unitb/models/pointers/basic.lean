@@ -4,12 +4,14 @@ import unitb.scheduling
 
 import separation.specification
 
+universes u
+
 namespace unitb.pointers
 open unitb separation
 
 section definitions
 
-parameter σ : Type
+parameter σ : Type u
 
 private def pred := σ → Prop
 
@@ -17,12 +19,13 @@ parameter {σ}
 variable inv : pred
 variable shape : σ → hprop
 
+parameter σ
+
 structure event :=
   (coarse : pred)
   (fine : pred)
   (step : ∀ (s s' : σ) (h h' : heap), coarse s → fine s → Prop)
 
-parameter σ
 structure program :=
   (lbl : Type)
   (first : pred)
