@@ -15,6 +15,10 @@ meta def sep_by_exactly : ℕ → parser unit → parser α → parser (list α)
 
 end lean.parser
 
+meta def name.primed : name → name
+ | (name.mk_string x y) := name.mk_string (x ++ "'") y
+ | x := x
+
 namespace unitb.parser
 
 open lean lean.parser
@@ -93,12 +97,11 @@ do updateex_env $ λ e₀, return $ e₀.add_namespace n,
 
 meta def add_record
   (n : name) (ps : list expr) (rt : expr)
-  (fields : list (name × expr))
+  (fs : list expr)
   (gen_drec : bool := ff)
 : tactic unit :=
 do updateex_env $ λ e₀, return $ e₀.add_namespace n,
    let t : expr := expr.mk_app (expr.const n [ ]) ps,
-   fs ← mmap (λ x : _ × _, mk_local_def x.1 x.2) fields,
    let ts := expr.pis fs t,
    let ts := expr.pis ps ts,
    let type_type := expr.pis ps rt,
@@ -126,6 +129,7 @@ meta def add_symbols : list (name × expr) → environment → exceptional envir
 
 -- @[reducible]
 meta structure scope :=
+  (mch_nm : name)
   (vars : list (expr × expr))
   (names : list name)
   (env : environment)
@@ -140,11 +144,23 @@ do env₀ ← (tactic.get_env : parser _),
    set_env env₀,
    subst_consts s.vars e
 
-meta def mk_scope (vs : list (name × expr)) : parser scope :=
+meta def scope.mk_state_pred (s : scope) (n : name) (pred : list (name × pexpr)) : tactic pexpr :=
+do let vars := s.local_consts,
+   pred' ← mmap ((λ ⟨n,t⟩, to_expr t >>= mk_local_def n) : name × pexpr → tactic expr) pred,
+   add_record n.primed vars `(Prop) pred' tt,
+   state ← resolve_name (s.mch_nm <.> "state") >>= to_expr,
+   state_rec ← resolve_name (s.mch_nm <.> "state" <.> "rec"),
+   pred ← resolve_name n.primed,
+   let t := expr.pi `_ binder_info.default state `(Prop),
+   d ← to_expr ``(λ x : %%state, (%%state_rec %%pred x : Prop)),
+   add_decl (mk_definition n [ ] t d),
+   resolve_name n
+
+meta def mk_scope (n : name) (vs : list (name × expr)) : parser scope :=
 do env ← tactic.get_env,
    vars ← mk_subst_list vs,
    env' ← add_symbols vs env,
-   return { vars := vars, env := env', names := map prod.fst vs }
+   return { mch_nm := n, vars := vars, env := env', names := map prod.fst vs }
 
 meta def scope.s_var (s : scope) : parser name :=
 do v ← ident,
@@ -155,21 +171,22 @@ do v ← ident,
 meta def clause (s : scope) : parser (name × pexpr) :=
 prod.mk <$> ident <* tk ":" <*> s.texpr
 
-meta def add_inv_record (n : name) (s : scope) (invs : list (name × pexpr)) : tactic unit :=
-do let vars := s.local_consts,
-   invs' ← mmap ((λ ⟨n,t⟩, prod.mk n <$> to_expr t) : name × pexpr → tactic (name × expr)) invs <|> fail "this failed",
-   add_record (n <.> "inv'") vars `(Prop) invs' tt,
-   state ← resolve_name (n <.> "state") >>= to_expr,
-   -- p ← to_expr ``(λ _ : %%state, Prop),
-   state_rec ← resolve_name (n <.> "state" <.> "rec"),
-   inv ← resolve_name (n <.> "inv'"),
-   let t := expr.pi `_ binder_info.default state `(Prop),
-   d ← to_expr ``(λ x : %%state, (%%state_rec %%inv x : Prop)),
-   add_decl (mk_definition (n <.> "inv") [ ] t d)
+-- ∀ s s' s'', s(Next)s' ∧ s(Next)s'' ⟹ s' = s''
+meta def add_inv_record (s : scope) (invs : list (name × pexpr)) : tactic unit :=
+do s.mk_state_pred (s.mch_nm <.> "inv") invs, return ()
+-- do let vars := s.local_consts,
+--    invs' ← mmap ((λ ⟨n,t⟩, prod.mk n <$> to_expr t) : name × pexpr → tactic (name × expr)) invs,
+--    add_record (s.mch_nm <.> "inv'") vars `(Prop) invs' tt,
+--    state ← resolve_name (s.mch_nm <.> "state") >>= to_expr,
+--    state_rec ← resolve_name (s.mch_nm <.> "state" <.> "rec"),
+--    inv ← resolve_name (s.mch_nm <.> "inv'"),
+--    let t := expr.pi `_ binder_info.default state `(Prop),
+--    d ← to_expr ``(λ x : %%state, (%%state_rec %%inv x : Prop)),
+--    add_decl (mk_definition (s.mch_nm <.> "inv") [ ] t d)
 
-meta def add_state_record (n : name) (vars : list (name × expr)) : tactic unit :=
-do updateex_env $ λ e₀, return $ e₀.add_namespace n,
-   add_record (n <.> "state") [ ] `(Type 1) vars
+meta def add_state_record (s : scope) : tactic unit :=
+do updateex_env $ λ e₀, return $ e₀.add_namespace s.mch_nm,
+   add_record (s.mch_nm <.> "state") [ ] `(Type 1) s.local_consts
 
 open lean (parser)
 
@@ -188,8 +205,8 @@ meta def assignment (vs : scope) : parser (list (name × pexpr)) :=
 do ts ← sep_by1 (tk ",") vs.s_var <* tk ":=",
    s  ← sep_by_exactly ts.length (tk ",") vs.texpr,
    return $ zip ts s
-
-meta def parse_event (m : name) (vs : scope) : parser (name × expr) :=
+open predicate
+meta def parse_event (vs : scope) : parser (name × expr) :=
 do id ← ident,
    xs ← (tk "when" *> sep_by (tk ",") (clause vs) <* tk "then")
        <|> (tk "begin" *> return [ ]),
@@ -198,10 +215,11 @@ do id ← ident,
    -- trace "parse_event",
    -- trace xs,
    -- trace acts,
-   state ← (resolve_name (m <.> "state") >>= to_expr : tactic _),
+   coarse ← vs.mk_state_pred (id.update_prefix (vs.mch_nm <.> "event") <.> "coarse") xs,
+   state ← (resolve_name (vs.mch_nm <.> "state") >>= to_expr : tactic _),
    spec ← to_expr ``( { unitb.pointers.event
-                      . coarse := sorry
-                      , fine := sorry
+                      . coarse := %%coarse
+                      , fine := True
                       , step := sorry } : unitb.pointers.event %%state ),
    return (id, spec)
 
@@ -252,15 +270,15 @@ do e ← get_env,
    -- infer_type d >>= trace,
    infer_type d >>= unify t,
    d ← instantiate_mvars d,
-   -- trace d.to_raw_fmt,
+   trace d,
    add_decl (mk_definition (n <.> "event" <.> "spec") ls t d)
 
-meta def event_section (m : name) (s : scope) : parser unit :=
+meta def event_section (s : scope) : parser unit :=
 do tk "events",
-   es ← many (parse_event m s),
-   add_enum_type (m <.> "event") (map prod.fst es),
+   es ← many (parse_event s),
+   add_enum_type (s.mch_nm <.> "event") (map prod.fst es),
    trace "add_enum_type",
-   mk_event_spec m (map prod.snd es),
+   mk_event_spec s.mch_nm (map prod.snd es),
    trace "mk_event_spec"
 
 -- #check unitb.pointers.event
@@ -297,11 +315,11 @@ do n ← ident,
    vs ← sep_by (tk ",") ident,
    tk "invariants",
    let vs' : list (name × expr) := map (λ n, (n,`(Set.{0}))) vs,
-   s ← mk_scope vs',
+   s ← mk_scope n vs',
    invs ← sep_by (tk ",") (clause s),
-   add_state_record n vs',
-   add_inv_record n s invs,
-   event_section n s,
+   add_state_record s,
+   add_inv_record s invs,
+   event_section s,
    mk_machine_spec n,
    tk "end"
 
@@ -326,7 +344,7 @@ end
 
 #print prefix foo
 #print foo.event.spec
-#print foo.event
+#print foo.event.add_x.coarse'
 
 example (s : foo.state) (J : foo.inv s) : true :=
 begin
