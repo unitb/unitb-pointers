@@ -24,7 +24,7 @@ parameter σ
 structure event :=
   (coarse : pred)
   (fine : pred)
-  (step : ∀ (s s' : σ) (h h' : heap), coarse s → fine s → Prop)
+  (step : ∀ (s s' : σ) (h : heap), coarse s → fine s → Prop)
 
 structure program :=
   (lbl : Type)
@@ -46,11 +46,11 @@ M.first s → (M.firsth s).apply h → p (s,h)
 
 def program.step : xσ → xσ → Prop
 | ⟨s,hp⟩ ⟨s',hp'⟩ :=
-(s,hp) = (s',hp') ∨ ∃ e hc hf, (M.events e).step s s' hp hp' hc hf
+s = s' ∨ ∃ e hc hf, (M.events e).step s s' hp hc hf
 
 def program.step_of (e : M.lbl) : xσ → xσ → Prop
 | ⟨s,hp⟩ ⟨s',hp'⟩ :=
-∃ hc hf, (M.events e).step s s' hp hp' hc hf
+∃ hc hf, (M.events e).step s s' hp hc hf
 
 def program.coarse_sch_of (act : M.lbl) : pred' :=
 (M.events act).coarse ∘ prod.fst
@@ -107,11 +107,11 @@ end
 
 structure event_correctness (e : event) :=
   (step_fis : ∀ s hp hc hf, (shape s).apply hp →
-               ∃ s' hp', e.step s s' hp hp' hc hf)
+               ∃ s', e.step s s' hp hc hf)
   (step_inv : ∀ (s s' : σ) (hp hp' : heap) hc hf,
                 inv s → (shape s).apply hp →
-                e.step s s' hp hp' hc hf →
-                inv s ∧ (shape s).apply hp)
+                e.step s s' hp hc hf →
+                inv s' ∧ (shape s).apply hp')
 
 structure machine_correctness (m : program) :=
   (init : m.first ⟹ m.inv)
