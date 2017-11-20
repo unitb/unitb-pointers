@@ -22,6 +22,27 @@ def mmapp (f : α → β → m γ) : list (α × β) → m (list γ)
 
 end list
 
+namespace rb_map
+
+variables {k : Type}
+variables {α : Type}
+variables {β : Type}
+variables {γ : Type}
+variables [has_ordering k]
+private def list_zip_with (f : k → α → β → γ) : list (k × α) → list (k × β) → list (k × γ)
+| ((k₀,x)::xs) ((k₁,y)::ys) :=
+ match has_ordering.cmp k₀ k₁ with
+  | ordering.gt := list_zip_with xs ((k₁,y)::ys)
+  | ordering.lt := list_zip_with ((k₀,x)::xs) ys
+  | ordering.eq := (k₀,f k₀ x y) :: list_zip_with xs ys
+ end
+| _ _ := [ ]
+
+meta def zip_with (f : k → α → β → γ) (m₀ : rb_map k α) (m₁ : rb_map k β) : rb_map k γ :=
+rb_map.of_list (list_zip_with f m₀.to_list m₁.to_list)
+
+end rb_map
+
 namespace lean.parser
 open lean list nat applicative
 variables {α : Type}
@@ -40,12 +61,16 @@ namespace tactic
 meta def trace_type (tag : string) (e : expr) : tactic unit :=
 do e' ← tactic.pp e,
    t' ← infer_type e >>= tactic.pp,
-   trace format!"* {tag} \n- {e'} \n: {t'}"
+   trace format!"* {tag} \n  - {e'} \n  : {t'}"
 
 end tactic
 
 meta def name.primed : name → name
  | (name.mk_string x y) := name.mk_string (x ++ "'") y
+ | x := x
+
+meta def name.unprimed : name → name
+ | (name.mk_string x y) := name.mk_string x.pop_back y
  | x := x
 
 namespace unitb.parser
@@ -284,7 +309,7 @@ meta def add_state_record (s : scope) : tactic unit :=
 do updateex_env $ λ e₀, return $ e₀.add_namespace s.mch_nm,
    add_record (s.mch_nm <.> "state") [ ] `(Type 1) s.local_consts
 
-open lean (parser)  monad (mmap₂)
+open lean (parser)  monad (mmap₂) predicate
 
 meta def assignment (vs : scope) : parser (list (expr × expr)) :=
 do ts ← sep_by1 (tk ",") vs.s_var <* tk ":=",
@@ -292,7 +317,25 @@ do ts ← sep_by1 (tk ",") vs.s_var <* tk ":=",
    s' ← (mmap to_expr s : tactic _),
    return $ zip ts s'
 
-open predicate
+meta def mk_step_spec (qual_id : name) (vs : scope)
+   (cs fs : list expr)
+   (acts₀ : list (name × pexpr))
+: tactic pexpr :=
+do hp ← mk_local_def `hp `(heap),
+   let hp_r := record_param.var hp,
+   s  ← vs.state,
+   s' ← vs.primed_state,
+   hc ← mk_app (qual_id <.> "coarse") [s.local] >>= mk_local_def `hc,
+   hf ← mk_app (qual_id <.> "fine") [s.local] >>= mk_local_def `hf,
+   let acts₁ := foldl (λ (e : name_map _), e.erase ∘ prod.fst) vs.vars acts₀,
+   let acts₂ := rb_map.zip_with (λ n v v', ``(%%v' = %%v)) acts₁ vs.primed_v,
+   let coarse_r := record_param.record hc
+                      (qual_id <.> "coarse")
+                      (qual_id <.> "coarse'" <.> "drec_on") s.vars cs,
+   let fine_r := record_param.record hf
+                      (qual_id <.> "fine")
+                      (qual_id <.> "fine'" <.> "drec_on") s.vars fs,
+   mk_pred (qual_id <.> "step") [s,s',hp_r,coarse_r,fine_r] (acts₂.to_list ++ acts₀)
 
 meta def parse_event (vs : scope) : parser (name × expr) :=
 do id ← ident,
@@ -302,24 +345,11 @@ do id ← ident,
    tk "end",
    let qual_id := id.update_prefix (vs.mch_nm <.> "event"),
    state  ← (resolve_name (vs.mch_nm <.> "state") >>= to_expr : tactic _),
-   s  ← vs.state,
-   s' ← vs.primed_state,
-   hp ← mk_local_def `hp `(heap),
    cs ← (mmapp (λ n t, to_expr t >>= mk_local_def n) xs : tactic (list expr)),
-   let hp_r := record_param.var hp,
-   acts ← (mmapp (λ (v : expr) (p : expr), do
-     return (v.local_pp_name, ``(%%v = %%p))) acts : tactic _),
+   let acts := mapp (λ (v : expr) (p : expr), (v.local_pp_name.unprimed, ``(%%v = %%p))) acts,
    coarse ← vs.mk_state_pred (qual_id <.> "coarse") xs,
    fine   ← vs.mk_state_pred (qual_id <.> "fine") [ ],
-   hc ← (mk_app (qual_id <.> "coarse") [s.local] >>= mk_local_def `hc : tactic _),
-   let coarse_r := record_param.record hc
-                      (qual_id <.> "coarse")
-                      (qual_id <.> "coarse'" <.> "drec_on") s.vars cs,
-   hf ← (mk_app (qual_id <.> "fine") [s.local] >>= mk_local_def `hf : tactic _),
-   let fine_r := record_param.record hf
-                      (qual_id <.> "fine")
-                      (qual_id <.> "fine'" <.> "drec_on") s.vars [ ],
-   step ← mk_pred (qual_id <.> "step") [s,s',hp_r,coarse_r,fine_r] acts,
+   step ← mk_step_spec qual_id vs cs [ ] acts,
    spec ← to_expr ``( { unitb.pointers.event
                       . coarse := %%coarse
                       , fine := %%fine
@@ -394,14 +424,17 @@ events
   move
     when grd1 : ∅ ∈ x
     then end
-  add_x begin end
+  add_x begin x := y end
   swap begin x,y := y,x end
 end
 
 #print prefix foo.event.swap
 #print prefix foo.event.move
 #print foo.event.swap.step'
+#print foo.event.add_x.step'
+#print foo.event.move.step'
 #print foo.event.spec
+#print foo.spec
 
 example (s : foo.state) (J : foo.inv s) : true :=
 begin
