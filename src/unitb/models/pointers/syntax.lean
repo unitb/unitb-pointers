@@ -294,9 +294,11 @@ do env ← tactic.get_env,
           , env := env'
           , names := map prod.fst vs }
 
-meta def scope.s_var (s : scope) : parser expr :=
+meta def scope.s_var (s : scope) (pre_state : bool) : parser expr :=
 do v ← ident,
-   s.primed_v.find v
+   (if pre_state
+      then s.primed_v.find v
+      else s.vars.find v)
        <|> fail format!"Invalid state variable: {v}\nExpecting: {s.names}"
 
 meta def clause (s : scope) : parser (name × pexpr) :=
@@ -311,11 +313,15 @@ do updateex_env $ λ e₀, return $ e₀.add_namespace s.mch_nm,
 
 open lean (parser)  monad (mmap₂) predicate
 
-meta def assignment (vs : scope) : parser (list (expr × expr)) :=
-do ts ← sep_by1 (tk ",") vs.s_var <* tk ":=",
-   s  ← sep_by_exactly ts.length (tk ",") vs.texpr,
-   s' ← (mmap to_expr s : tactic _),
+meta def assignment (vs : scope) (pre_state : bool) : parser (list (expr × expr)) :=
+do ts ← sep_by1 (tk ",") (vs.s_var pre_state) <* tk ":=",
+   s  ← sep_by_exactly ts.length (tk ",")
+             (if pre_state then vs.texpr else texpr),
+   s' ← (mmap₂ (λ v e, do t ← infer_type v, to_expr ``(%%e : %%t)) ts s : tactic _),
    return $ zip ts s'
+
+meta def parse_assignment (vs : scope) (pre_state : bool := tt) : parser (list (expr × expr)) :=
+join <$> sep_by (tk ",") (assignment vs pre_state)
 
 meta def mk_step_spec (qual_id : name) (vs : scope)
    (cs fs : list expr)
@@ -341,7 +347,7 @@ meta def parse_event (vs : scope) : parser (name × expr) :=
 do id ← ident,
    xs ← (tk "when" *> sep_by (tk ",") (clause vs) <* tk "then")
        <|> (tk "begin" *> return [ ]),
-   acts ← join <$> sep_by (tk ",") (assignment vs),
+   acts ← parse_assignment vs,
    tk "end",
    let qual_id := id.update_prefix (vs.mch_nm <.> "event"),
    state  ← (resolve_name (vs.mch_nm <.> "state") >>= to_expr : tactic _),
@@ -361,12 +367,12 @@ do e ← get_env,
    decl ← e.get (n <.> "state"),
    let ls := decl.univ_params,
    let state : expr := expr.const (n <.> "state") (map level.param ls),
-   event ← resolve_name (n <.> "event") >>= to_expr <|> fail "B",
+   event ← resolve_name (n <.> "event") >>= to_expr,
    evt_struct ← to_expr ``(unitb.pointers.event %%state),
    t ← to_expr ``(%%event → unitb.pointers.event %%state),
    rec ← resolve_name (n <.> "event" <.> "rec") >>= to_expr,
    e ← mk_local_def `e event,
-   let d := rec.mk_app (rs),
+   let d := rec.mk_app rs,
    infer_type d >>= unify t,
    d ← instantiate_mvars d,
    add_decl (mk_definition (n <.> "event" <.> "spec") ls t d)
@@ -380,19 +386,42 @@ do tk "events",
 meta def mk_machine_spec (n : name) : tactic unit :=
 do state ← resolve_name (n <.> "state") >>= to_expr,
    inv   ← resolve_name (n <.> "inv"),
+   init  ← resolve_name (n <.> "init"),
    evts     ← resolve_name (n <.> "event"),
    evt_spec ← resolve_name (n <.> "event" <.> "spec"),
    t ← mk_app `unitb.pointers.program [ state ],
    d ← to_expr ``( { unitb.pointers.program
                    . lbl := %%evts
-                   , first  := sorry
-                   , firsth := sorry
+                   , first  := %%init
+                   , firsth := λ _, separation.emp
                    , lbl_is_sched := sorry
                    , inv := %%inv
-                   , shape := sorry
+                   , shape := λ _, separation.emp
                    , events := %%evt_spec } ),
    add_decl (mk_definition (n <.> "spec") [ ] t d)
 
+meta def variable_decl (n : name) : parser scope :=
+do tk "variables",
+   vs ← sep_by (tk ",") ident,
+   let vs' : list (name × expr) := map (λ n, (n,`(Set.{0}))) vs,
+   mk_scope n vs'
+
+meta def init_section (s : scope) : parser unit :=
+do tk "initialization",
+   vs ← parse_assignment s ff,
+   rec ← s.state,
+   let fs := mapp (λ x e : expr, (x.local_pp_name,``(%%x = %%e))) vs,
+   let miss := foldl (λ (e : name_map _), e.erase ∘ prod.fst) s.vars fs,
+   when (¬ miss.empty) $ fail format!"No initial value provided for {miss.keys}",
+   mk_pred (s.mch_nm <.> "init") [rec] fs *> return ()
+
+meta def invariant_section (s : scope) : parser unit :=
+do tk "invariants",
+   invs ← sep_by (tk ",") (clause s),
+   add_state_record s,
+   add_inv_record s invs
+
+precedence `initialization` : 0
 precedence `invariants` : 0
 precedence `events` : 0
 precedence `when` : 0
@@ -402,14 +431,9 @@ notation when := _root_.when
 meta def unitb_machine (meta_info : decl_meta_info) (_ : parse $ tk "machine") : parser unit :=
 do n ← ident,
    updateex_env $ λ e₀, return $ e₀.add_namespace n,
-   tk "variables",
-   vs ← sep_by (tk ",") ident,
-   tk "invariants",
-   let vs' : list (name × expr) := map (λ n, (n,`(Set.{0}))) vs,
-   s ← mk_scope n vs',
-   invs ← sep_by (tk ",") (clause s),
-   add_state_record s,
-   add_inv_record s invs,
+   s ← variable_decl n,
+   invariant_section s,
+   init_section s,
    event_section s,
    mk_machine_spec n,
    tk "end"
@@ -420,6 +444,8 @@ machine foo
 variables x, y
 invariants
   bar: x ∪ y ⊆ x
+initialization
+  x := ∅, y := ∅
 events
   move
     when grd1 : ∅ ∈ x
@@ -434,6 +460,7 @@ end
 #print foo.event.add_x.step'
 #print foo.event.move.step'
 #print foo.event.spec
+#print foo.init'
 #print foo.spec
 
 example (s : foo.state) (J : foo.inv s) : true :=
