@@ -421,6 +421,21 @@ do tk "events",
    mk_event_spec s.mch_nm (map prod.snd es),
    return inst
 
+meta def po_table := (name_map (list expr × expr))
+
+meta def proof_section (s : scope) (pos : po_table) : parser unit :=
+do tk "proofs",
+   id ← ident <* tk ":=",
+   (hyp,g) ← pos.find id <|> fail format!"invalid proof obligation: {id};\n{pos.keys}",
+   pr ← s.texpr,
+   let g' := expr.pis hyp g,
+   ((do t ← mk_meta_var g',
+        set_goals [t],
+        intron hyp.length,
+        exact pr) : tactic _),
+   tk ",",
+   return ()
+
 meta def mk_machine_spec (n : name) (evt_sch : expr) : tactic unit :=
 do state ← resolve_name (n <.> "state") >>= to_expr,
    inv   ← resolve_name (n <.> "inv"),
@@ -438,31 +453,53 @@ do state ← resolve_name (n <.> "state") >>= to_expr,
                    , events := %%evt_spec } ),
    add_decl (mk_definition (n <.> "spec") [ ] t d)
 
+meta def mk_machine_correctness (n : name) : tactic unit :=
+-- do state ← resolve_name (n <.> "state") >>= to_expr,
+--    inv   ← resolve_name (n <.> "inv"),
+--    init  ← resolve_name (n <.> "init"),
+--    evts     ← resolve_name (n <.> "event"),
+--    evt_spec ← resolve_name (n <.> "event" <.> "spec"),
+do mch ← resolve_name (n <.> "spec") >>= to_expr,
+   t ← mk_app `unitb.pointers.machine_correctness [ mch ],
+   d ← to_expr ``( { init := sorry
+                   , initp := sorry
+                   , events := sorry } : unitb.pointers.machine_correctness %%mch ),
+   add_decl (mk_definition (n <.> "correctness") [ ] t d)
+
 meta def variable_decl (n : name) : parser scope :=
 do tk "variables",
    vs ← sep_by (tk ",") ident,
    let vs' : list (name × expr) := map (λ n, (n,`(Set.{0}))) vs,
    mk_scope n vs'
 
-meta def init_section (s : scope) : parser unit :=
+meta def init_section (s : scope) : parser (list expr) :=
 do tk "initialization",
    vs ← parse_assignment s ff,
    rec ← s.state,
    let fs := mapp (λ x e : expr, (x.local_pp_name,``(%%x = %%e))) vs,
    let miss := foldl (λ (e : name_map _), e.erase ∘ prod.fst) s.vars fs,
    when (¬ miss.empty) $ fail format!"No initial value provided for {miss.keys}",
-   mk_pred (s.mch_nm <.> "init") [rec] fs *> return ()
+   mk_pred (s.mch_nm <.> "init") [rec] fs,
+   (mmapp (λ n t, to_expr t >>= mk_local_def n) fs : tactic _) <* return ()
 
-meta def invariant_section (s : scope) : parser unit :=
+meta def invariant_section (s : scope) : parser (list expr) :=
 do tk "invariants",
    invs ← sep_by (tk ",") (clause s),
    add_state_record s,
-   add_inv_record s invs
+   add_inv_record s invs, tactic.trace "here",
+   (mmapp (λ n p, tactic.trace p >> to_expr p >>= mk_local_def n) invs <* tactic.trace "there" : tactic _) <* return ()
+
+meta def mk_proof_obligations (s : scope) (init invs : list expr)
+: tactic po_table :=
+do tactic.trace init,
+   tactic.trace invs,
+   rb_map.of_list <$> mmap (λ p : expr, do t ← infer_type p, return (p.local_pp_name, s.vars.values ++ init, t)) invs
 
 precedence `initialization` : 0
 precedence `invariants` : 0
 precedence `events` : 0
-precedence `when` : 0
+precedence `when`   : 0
+precedence `proofs` : 0
 notation when := _root_.when
 
 @[user_command]
@@ -470,10 +507,13 @@ meta def unitb_machine (meta_info : decl_meta_info) (_ : parse $ tk "machine") :
 do n ← ident,
    updateex_env $ λ e₀, return $ e₀.add_namespace n,
    s ← variable_decl n,
-   invariant_section s,
-   init_section s,
+   invs ← invariant_section s,
+   init ← init_section s,
    sch ← event_section s,
+   pos ← mk_proof_obligations s init invs,
+   proof_section s pos,
    mk_machine_spec n sch,
+   mk_machine_correctness n,
    tk "end"
 
 end unitb.parser
@@ -490,8 +530,15 @@ events
     then end
   add_x begin x := y end
   swap begin x,y := y,x end
+proofs
+  bar :=
+  begin
+    simp [x_1,y_1], admit,
+  end,
+
 end
 
+#print foo.correctness
 #print prefix foo.event.swap
 #print prefix foo.event.move
 #print foo.event.swap.step'
