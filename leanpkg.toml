@@ -6,6 +6,6 @@ path = "src"
 
 [dependencies]
 mathlib = {git = "https://github.com/leanprover/mathlib", rev = "5ad8020f67eb13896a41cc7691d072c9331b1f76"}
-lean-lib = {git = "https://github.com/unitb/lean-lib", rev = "818338381d7e12d105ecf5d7f382015f8223d085"}
+lean-lib = {git = "https://github.com/unitb/lean-lib", rev = "7f42bcb883e1d32b5f7c583d7f3772c23460a542"}
 unitb = {git = "https://github.com/unitb/unitb-semantics", rev = "2366ea8e9e9b63e30ca2f06c283188943324ebbd"}
 separation-logic = {git = "https://github.com/unitb/separation-logic", rev = "7d452290cc79e4320abe88b0909ebdc5c8a9d054"}

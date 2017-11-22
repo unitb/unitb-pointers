@@ -1,5 +1,6 @@
 import unitb.models.pointers.basic
 import util.control.monad
+import util.data.generic
 import theories.set_theory
 
 universes u v w k
@@ -150,6 +151,40 @@ do updateex_env $ λ e₀, return $ e₀.add_namespace n,
    let constrs := map (λ c : name, (c.update_prefix n, t)) vals,
    add_inductive n [ ] 0 `(Type) constrs ff,
    mk_cases_on n [ ] ([ ] <$ vals)
+
+open tactic.interactive
+
+meta def mk_finite_instance (n : name) : tactic expr :=
+do t ← resolve_name n,
+   gen ← to_expr ``(generic %%t),
+   (_,inst) ← solve_aux gen mk_generic_instance,
+   inst ← instantiate_mvars inst,
+   inst_n ← mk_fresh_name,
+   add_decl (mk_definition inst_n [ ] gen inst),
+   set_basic_attribute `instance inst_n tt,
+   cl ← to_expr ``(finite %%t),
+   inst ← to_expr ``(finite_generic %%t),
+   inst_n ← mk_fresh_name,
+   add_decl (mk_definition inst_n [ ] cl inst),
+   set_basic_attribute `instance inst_n tt,
+   resolve_name inst_n >>= to_expr
+
+meta def mk_sched_instance (e : expr) : tactic expr :=
+(do `(finite %%t) ← infer_type e | failed,
+    cl ← to_expr ``(scheduling.sched %%t),
+    inst ← to_expr ``(scheduling.sched.fin %%e),
+    n ← mk_fresh_name,
+    add_decl (mk_definition n [ ] cl inst),
+    set_basic_attribute `instance n tt,
+    resolve_name n >>= to_expr)
+<|>
+(do `(infinite %%t) ← infer_type e | failed,
+    cl ← to_expr ``(scheduling.sched %%t),
+    inst ← to_expr ``(scheduling.sched.inf %%e),
+    n ← mk_fresh_name,
+    add_decl (mk_definition n [ ] cl inst),
+    set_basic_attribute n `instance tt,
+    resolve_name n >>= to_expr)
 
 meta def add_record
   (n : name) (ps : list expr) (rt : expr)
@@ -377,13 +412,16 @@ do e ← get_env,
    d ← instantiate_mvars d,
    add_decl (mk_definition (n <.> "event" <.> "spec") ls t d)
 
-meta def event_section (s : scope) : parser unit :=
+meta def event_section (s : scope) : parser expr :=
 do tk "events",
    es ← many (parse_event s),
    add_enum_type (s.mch_nm <.> "event") (map prod.fst es),
-   mk_event_spec s.mch_nm (map prod.snd es)
+   fin ← mk_finite_instance (s.mch_nm <.> "event"),
+   inst ← mk_sched_instance fin,
+   mk_event_spec s.mch_nm (map prod.snd es),
+   return inst
 
-meta def mk_machine_spec (n : name) : tactic unit :=
+meta def mk_machine_spec (n : name) (evt_sch : expr) : tactic unit :=
 do state ← resolve_name (n <.> "state") >>= to_expr,
    inv   ← resolve_name (n <.> "inv"),
    init  ← resolve_name (n <.> "init"),
@@ -394,7 +432,7 @@ do state ← resolve_name (n <.> "state") >>= to_expr,
                    . lbl := %%evts
                    , first  := %%init
                    , firsth := λ _, separation.emp
-                   , lbl_is_sched := sorry
+                   , lbl_is_sched := %%evt_sch
                    , inv := %%inv
                    , shape := λ _, separation.emp
                    , events := %%evt_spec } ),
@@ -434,8 +472,8 @@ do n ← ident,
    s ← variable_decl n,
    invariant_section s,
    init_section s,
-   event_section s,
-   mk_machine_spec n,
+   sch ← event_section s,
+   mk_machine_spec n sch,
    tk "end"
 
 end unitb.parser
