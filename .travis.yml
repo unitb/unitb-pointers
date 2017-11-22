@@ -88,6 +88,7 @@ script:
 # - git submodule sync
 - leanpkg configure
 - leanpkg build -- --trust=2
+- leanpkg test
 notifications:
   slack:
     rooms:
